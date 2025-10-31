@@ -47,17 +47,26 @@ class Params(object):
 
         self.parser.add_argument('--scenes_list', nargs='+')
 
-        self.parser.add_argument('--root_path', type=str, dest='root_path', default="~/")
-        
-        self.parser.add_argument('--episodes_path', type=str, dest='episodes_path', default="habitat-api/data/datasets/objectnav/mp3d/")
-        self.parser.add_argument('--ep_set', type=str, dest='ep_set', default='v1', choices=['v1','v3','v5'])
-        self.parser.add_argument('--episodes_root', type=str, dest='episodes_root', default="")
-        
-        self.parser.add_argument('--scenes_dir', type=str, dest='scenes_dir', default='habitat-api/data/scene_datasets/')
-        self.parser.add_argument('--episodes_save_dir', type=str, dest='episodes_save_dir', default="mp3d_objnav_episodes_tmp/")
+        self.parser.add_argument('--root_path', type=str, dest='root_path', default="/home/robotlab/")
+
+        # 下面2个是 读取glb的路径
+        # 读取json.gz的路径： episodes_path + ep_set + '/'  + cfg.DATASET.SPLIT + "/content/" + self.scene_id + ".json.gz"
+        self.parser.add_argument('--episodes_path', type=str, dest='episodes_path', default="dataset/L2M_episodes/")
+        self.parser.add_argument('--ep_set', type=str, dest='ep_set', default='objectnav_mp3d_v1', choices=['objectnav_mp3d_v1','v1','v3','v5'])
+        # self.parser.add_argument('--episodes_root', type=str, dest='episodes_root', default="")
+
+        #  下面两个是，保存NPZ的路径，同时也是读取glb的路径。
+        # 读取glb的路径： root_path + scenes_dir + "mp3d/" + scene_id + '/' + scene_id + '.glb'
+        # 保存NPZ的路径： root_path + scenes_dir + episodes_save_dir + split + "/"
+        self.parser.add_argument('--scenes_dir', type=str, dest='scenes_dir', default='$$$$$wtf/dataset/MP3D_dataset/v1/tasks/mp3d_habitat/')
+        self.parser.add_argument('--episodes_save_dir', type=str, dest='episodes_save_dir', default="NPZ/")
+
+        # scene_id 是场景的名字
 
         self.parser.add_argument('--gpu_capacity', type=int, dest='gpu_capacity', default=2)
 
+        self.parser.add_argument('--occupancy_height_thresh', type=float, dest='occupancy_height_thresh', default=-1.0,
+                                 help='used when estimating occupancy from depth')
 
 # 每个进程实际执行的任务。
 # 每个进程负责一个 scene_id。
@@ -71,7 +80,10 @@ def store_episodes(options, config_file, scene_id):
     existing_episode_list = os.listdir(episode_save_dir) # keep track of previously saved episodes
 
     # 初始化数据类. 通过 HabitatDataScene 加载该场景的模拟器；产生所有 episode（轨迹）样本。
+    print("     [zhjd-debug] options.episodes_path: ", options.episodes_path)
+    print("     [zhjd-debug] options.ep_set: ", options.ep_set)
     options.episodes_root = options.episodes_path + options.ep_set + '/'
+    print("     [zhjd-debug] options.episodes_root: ", options.episodes_root)
     data = HabitatDataScene(options, config_file, scene_id=scene_id, existing_episode_list=existing_episode_list)
 
     print(len(data))
@@ -133,6 +145,7 @@ def store_episodes(options, config_file, scene_id):
         # 目标语义栅格 (gt_grid_crops_objects)
         # RGB、分割、深度图像等
         filepath = episode_save_dir+'ep_'+str(ep_count)+'_'+str(episode_id)+"_"+scene_id
+        print('     [zhjd-debug] filepath', filepath)
         np.savez_compressed(filepath+'.npz',
                             abs_pose=abs_pose,
                             ego_grid_crops_spatial=ego_grid_crops_spatial,
@@ -178,8 +191,18 @@ if __name__ == '__main__':
     config_files = [config_file] * n
     args = [*zip(options_list, config_files, scene_ids)]
 
-    with Pool(processes=options.gpu_capacity) as pool:
+    # ✅ 打印每个任务的参数组合
+    print("\n===== Scene processing plan =====")
+    for idx, (opt, cfg, scene) in enumerate(args):
+        print(f"[{idx + 1}] Scene ID: {scene}")
+        print(f"    Config file: {cfg}")
+        print(f"    Max episodes: {opt.max_num_episodes}")
+        print(f"    Episode length: {opt.episode_len}")
+        print(f"    Split: {opt.split}")
+        print("-" * 60)
+    print("=================================\n")
 
+    with Pool(processes=options.gpu_capacity) as pool:
         pool.starmap(store_episodes, args)
 
     # exiting the 'with'-block has stopped the pool

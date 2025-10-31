@@ -23,7 +23,7 @@ import random
 import math
 from planning.ddppo_policy import DdppoPolicy
 
-
+# 作用：在指定场景上，用已训练好的“地图预测器 +（可选）图像分割 + 本地策略（DDPPO）”进行导航测试与度量统计；支持**多模型集成（ensemble）**与可视化、TensorBoard 记录。
 class NavTester(object):
     """ Implements testing for prediction models
     """
@@ -43,13 +43,21 @@ class NavTester(object):
         self.summary_writer = SummaryWriter(summary_dir)
 
         # point to our generated test episodes
-        self.options.episodes_root = "habitat-api/data/datasets/objectnav/mp3d/"+self.options.test_set+"/"
+        print("     [zhjd-debug] options.test_set:", options.test_set)
+        # self.options.episodes_root = "habitat-api/data/datasets/objectnav/mp3d/"+self.options.test_set+"/"
+        self.options.episodes_root = "dataset/test_for_object_goal_navigation/hard/"+self.options.test_set+"/"
+        print("     [zhjd-debug] options.episodes_root:", options.episodes_root)
 
+        # 3. 读取数据集与场景
+        print("     [zhjd-debug] scene_id:", scene_id)
+        print("     [zhjd-debug] options.config_test_file:", options.config_test_file)  # options.config_test_file: configs/my_objectnav_mp3d_test.yaml
         self.scene_id = scene_id
         self.test_ds = HabitatDataScene(self.options, config_file=self.options.config_test_file, scene_id=self.scene_id)
 
-
+        # 4. 组模型（Ensemble）加载: TODO: 加载多个预测器（结构相同但训练进程不同），推理时求均值/方差以稳健与不确定度估计。
+        print("     [zhjd-debug] options.ensemble_dir:", options.ensemble_dir)
         ensemble_exp = os.listdir(self.options.ensemble_dir) # ensemble_dir should be a dir that holds multiple experiments
+        print("     [zhjd-debug] ensemble_exp:", ensemble_exp)
         ensemble_exp.sort() # in case the models are numbered put them in order
         self.models_dict = {} # keys are the ids of the models in the ensemble
         for n in range(self.options.ensemble_size):
@@ -60,12 +68,12 @@ class NavTester(object):
             self.models_dict[n]['predictor_model'] = nn.DataParallel(self.models_dict[n]['predictor_model'])
 
             checkpoint_dir = self.options.ensemble_dir + "/" + ensemble_exp[n]
-            latest_checkpoint = tutils.get_latest_model(save_dir=checkpoint_dir)
+            latest_checkpoint = tutils.get_latest_model(save_dir=checkpoint_dir)      # 从每个子目录的 checkpoints/ 取时间最新的 .pt/.pth。
             print("Model", n, "loading checkpoint", latest_checkpoint)
             self.models_dict[n] = tutils.load_model(models=self.models_dict[n], checkpoint_file=latest_checkpoint)
             self.models_dict[n]["predictor_model"].eval()
 
-
+        # 5. 图像分割模型, 用于把 RGBD 投影/推断成物体语义的 egocentric 栅格裁剪，辅助地图预测。
         if self.options.with_img_segm:
             self.img_segmentor = get_img_segmentor_from_options(self.options)
             self.img_segmentor = self.img_segmentor.to(self.device)
@@ -73,8 +81,9 @@ class NavTester(object):
             # Needed only for models trained with multi-gpu setting
             self.img_segmentor = nn.DataParallel(self.img_segmentor)
 
+            print("     [zhjd-debug] options.img_segm_model_dir:", options.img_segm_model_dir)
             latest_checkpoint = tutils.get_latest_model(save_dir=self.options.img_segm_model_dir)
-            print("Loading image segmentation checkpoint", latest_checkpoint)
+            print("[origin-debug] Loading image segmentation checkpoint", latest_checkpoint)
 
             checkpoint = torch.load(latest_checkpoint)
             self.img_segmentor.load_state_dict(checkpoint['models']['img_segm_model'])
@@ -86,8 +95,19 @@ class NavTester(object):
         # Define what threshold to use for semantic prediction
         self.sem_thresh = self.options.sem_thresh
 
+        # 6. 目标类别映射与指标容器
         if self.options.test_set=="v3" or self.options.test_set=="v5":
-            self.target_sem_lbls = {"chair":1, "sofa":5, "bed":6, "cushion":4, "counter":13, "table":3}
+            # （1）定义导航目标物体。 作用：告诉AI代理需要寻找哪些物体。每个物体对应一个语义标签ID，用于在场景中识别该物体。
+            # self.target_sem_lbls = {"chair":1, "sofa":5, "bed":6, "cushion":4, "counter":13, "table":3}
+            self.target_sem_lbls = {
+                "chair": 1,  # 椅子，语义标签ID=1
+                "sofa": 5,  # 沙发，语义标签ID=5
+                "bed": 6,  # 床，语义标签ID=6
+                "cushion": 4,  # 坐垫，语义标签ID=4
+                "counter": 13,  # 柜台，语义标签ID=13
+                "table": 3  # 桌子，语义标签ID=3
+            }
+            # （2）控制测试规模。 作用：限制每个物体类别的测试次数，避免测试时间过长。
             # put a limit on the number of episodes to run for each object
             self.episode_counter = {"chair":0, "sofa":0, "bed":0, "cushion":0, "counter":0, "table":0}
             self.ep_limit = 25
@@ -96,6 +116,7 @@ class NavTester(object):
         elif self.options.test_set=="v7":
             self.target_sem_lbls = {"cabinet":19, "fireplace":23}
 
+        # 定义评估指标（metrics）
         self.metrics = ['distance_to_goal', 'success', 'spl', 'softspl']
 
         # initialize metrics
@@ -109,35 +130,55 @@ class NavTester(object):
             self.results['all']['mean_'+met] = []
         self.results['all']['mean_distance_to_goal_failed'] = []
 
+        # 7. 本地策略（DDPPO）加载
         # init local policy model
         if self.options.local_policy_model=="4plus":
             model_ext = 'gibson-4plus-mp3d-train-val-test-resnet50.pth'
         else:
             model_ext = 'gibson-2plus-resnet50.pth'
-        model_path = self.options.root_path + "local_policy_models/" + model_ext
+        model_path = self.options.root_path + "/L2M/local_policy_models/" + model_ext
         self.l_policy = DdppoPolicy(path=model_path)
         self.l_policy = self.l_policy.to(self.device)
 
-
+        # 8. 为图像分割投影准备 3D 变换网格。  用途：把 RGB/Depth 的像素/方向映射到地面栅格（投影）。
         # Build 3D transformation matrices
         # Need to do them independent of dataloader because the img_segm projection has different dimensions
+        # 设置图像分割尺寸(128,128)
         self.img_segm_size = (self.options.img_segm_size,self.options.img_segm_size)
+        # 生成方向坐标（xs, ys）
+        # | 名称        | 形状        | 含义        | 例子            |
+        # | --------- | --------- | --------- | ------------- |
+        # | `self.xs` | (128,128) | 每个像素的横向坐标 | 中间为 0，左边为负    |
+        # | `self.ys` | (128,128) | 每个像素的纵向坐标 | 中间为 0，上为正，下为负 |
         self.xs, self.ys = torch.tensor(np.meshgrid(np.linspace(-1,1,self.img_segm_size[0]), np.linspace(1,-1,self.img_segm_size[1])), device='cuda')
+        # 调整维度，方便网络使用。多出来的“1”是 batch 维度，方便后面和图像一起运算。
         self.xs = self.xs.reshape(1,self.img_segm_size[0],self.img_segm_size[1])
         self.ys = self.ys.reshape(1,self.img_segm_size[0],self.img_segm_size[1])
+        # 生成像素坐标（x, y）
+        # | 名称  | 形状        | 含义             |
+        # | --- | --------- | -------------- |
+        # | `x` | (128,128) | 每个像素的列号（0~127） |
+        # | `y` | (128,128) | 每个像素的行号（0~127） |
         x, y = torch.tensor(np.meshgrid(np.linspace(0, self.img_segm_size[0]-1, self.img_segm_size[0]), np.linspace(0, self.img_segm_size[1]-1, self.img_segm_size[1])), device='cuda')
+        # 组合像素坐标成点集
+        # | 步骤               | 结果形状        | 含义                |
+        # | ---------------- | ----------- | ----------------- |
+        # | `xy_img`         | (2,128,128) | 通道 0 是 x，通道 1 是 y |
+        # | `reshape(2,-1)`  | (2,16384)   | 展平为一维像素流          |
+        # | `transpose(0,1)` | (16384,2)   | 每一行一个像素的坐标 [x,y]  |
         xy_img = torch.vstack((x.reshape(1,self.img_segm_size[0],self.img_segm_size[1]), y.reshape(1,self.img_segm_size[0],self.img_segm_size[1])))
         points2D_step = xy_img.reshape(2, -1)
         self.points2D_step = torch.transpose(points2D_step, 0, 1) # Npoints x 2
 
-
+    # 在main.py中调用
+    # 3) 导航测试主流程：
     def test_navigation(self):
 
-        with torch.no_grad():
+        with torch.no_grad():  # 关闭梯度
 
             list_dist_to_goal, list_success, list_spl, list_soft_spl = [],[],[],[]
 
-            for idx in range(len(self.test_ds)):
+            for idx in range(len(self.test_ds)):    # 遍历 self.test_ds 的 episodes。
 
                 episode = self.test_ds.scene_data['episodes'][idx]
 

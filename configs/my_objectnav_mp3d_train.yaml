@@ -39,8 +39,9 @@ TASK:
   SUCCESS:
     SUCCESS_DISTANCE: 0.1
 
+# 用于生成自己的数据集
 DATASET:
   TYPE: ObjectNav-v1
   SPLIT: train
-  DATA_PATH: "~/habitat-api/data/datasets/objectnav/mp3d/v1/{split}/{split}.json.gz"
-  SCENES_DIR: "~/habitat-api/data/scene_datasets/"
+  DATA_PATH: "~/@@@@wtf-train2/habitat-api/data/datasets/objectnav/mp3d/v1/{split}/{split}.json.gz"
+  SCENES_DIR: "~/@@@@wtf-train/habitat-api/data/scene_datasets/"

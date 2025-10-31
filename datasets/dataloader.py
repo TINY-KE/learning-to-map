@@ -12,6 +12,8 @@ import datasets.util.utils as utils
 import os
 import gzip
 import json
+from datasets.util import viz_utils, map_utils
+
 
 # 用于eval和test
 class HabitatDataOffline(Dataset):
@@ -128,7 +130,7 @@ class HabitatDataImgSegm(HabitatDataOffline):
 
         return item
 
-# 用于 train 和 NavTest
+# 用于 train 和 NavTest， 以及生成本地NPZ
 ## Loads the simulator and episodes separately to enable per_scene collection of data
 class HabitatDataScene(Dataset):
 
@@ -140,6 +142,7 @@ class HabitatDataScene(Dataset):
         cfg = habitat.get_config(config_file)
         cfg.defrost()
         cfg.SIMULATOR.SCENE = options.root_path + options.scenes_dir + "mp3d/" + scene_id + '/' + scene_id + '.glb' # scene_dataset_path 用到了吗？
+        print("     [zhjd-debug] cfg.SIMULATOR.SCENE:", cfg.SIMULATOR.SCENE)
         #cfg.SIMULATOR.DEPTH_SENSOR.NORMALIZE_DEPTH = False
         cfg.SIMULATOR.TURN_ANGLE = options.turn_angle
         cfg.SIMULATOR.FORWARD_STEP_SIZE = options.forward_step_size
@@ -152,6 +155,7 @@ class HabitatDataScene(Dataset):
 
         ## Load episodes of scene_id
         ep_file_path = options.root_path + options.episodes_root + cfg.DATASET.SPLIT + "/content/" + self.scene_id + ".json.gz"
+        print("     [zhjd-debug] ep_file_path:", ep_file_path)
         with gzip.open(ep_file_path, "rt") as fp:
             self.scene_data = json.load(fp)
         self.number_of_episodes = len(self.scene_data["episodes"])

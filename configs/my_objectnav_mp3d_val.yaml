@@ -42,5 +42,5 @@ TASK:
 DATASET:
   TYPE: ObjectNav-v1
   SPLIT: val
-  DATA_PATH: "~/habitat-api/data/datasets/objectnav/mp3d/v5/{split}/{split}.json.gz"
-  SCENES_DIR: "~/habitat-api/data/scene_datasets/"
+  DATA_PATH: "~/@@@@wtf-val2/habitat-api/data/datasets/objectnav/mp3d/v5/{split}/{split}.json.gz"
+  SCENES_DIR: "~/@@@@wtf-val/habitat-api/data/scene_datasets/"

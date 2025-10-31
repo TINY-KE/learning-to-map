@@ -163,7 +163,7 @@ class TrainOptions(BaseOptions):
 
         self.parser.add_argument('--root_path', type=str, dest='root_path', default="~/")
         self.parser.add_argument('--episodes_root', type=str, dest='episodes_root', default="habitat-api/data/datasets/objectnav/mp3d/v1/")
-        self.parser.add_argument('--scenes_dir', type=str, dest='scenes_dir', default='habitat-api/data/scene_datasets/')
+        self.parser.add_argument('--scenes_dir', type=str, dest='scenes_dir', default='/@@@@wtf-train-options/habitat-api/data/scene_datasets/')
 
         self.parser.add_argument('--stored_episodes_dir', type=str, dest='stored_episodes_dir', default='mp3d_objnav_episodes_final/')
         self.parser.add_argument('--stored_imgSegm_episodes_dir', type=str, dest='stored_imgSegm_episodes_dir', default='mp3d_objnav_episodes_final_imgSegmOut/')
