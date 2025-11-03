@@ -20,10 +20,12 @@ class SemanticGrid(object):
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         
         # predicted sem grid over entire scene -- initially uniform distribution over the labels
+        #  初始化均匀先验, 则proj_grid中的每一个值都为 1/27
         self.sem_grid = torch.ones((self.batch_size, self.object_labels, self.grid_dim[0], self.grid_dim[1]), dtype=torch.float32, device=self.device)
         self.sem_grid = self.sem_grid*(1/self.object_labels)
 
         # observed ground-projected sem grid over entire scene
+        # 初始化均匀先验, 则proj_grid中的每一个值都为 0.3333
         self.proj_grid = torch.ones((self.batch_size, self.spatial_labels, self.grid_dim[0], self.grid_dim[1]), dtype=torch.float32, device=self.device)
         self.proj_grid = self.proj_grid*(1/self.spatial_labels)
         
@@ -31,7 +33,7 @@ class SemanticGrid(object):
         self.uncertainty_map = torch.zeros((self.batch_size, 1, self.grid_dim[0], self.grid_dim[1]), dtype=torch.float32, device=self.device)
         self.per_class_uncertainty_map = torch.zeros((self.batch_size, self.object_labels, self.grid_dim[0], self.grid_dim[1]), dtype=torch.float32, device=self.device)
 
-
+    # 从地面投影网格到地心坐标系的转换
     # Transform each ground-projected grid into geocentric coordinates
     def spatialTransformer(self, grid, pose, abs_pose):
         # Input: 
@@ -75,8 +77,12 @@ class SemanticGrid(object):
 
         return geo_grid_out
 
-    
+    # 这个函数实现了一个空间坐标变换器，将地面投影的网格数据转换到地心坐标系。主要用于人形机器人的路径规划系统，处理在狭窄空间中的坐标变换问题
     # Transform a geocentric map back to egocentric view
+    # # 输入参数：
+    # grid:     序列长度 × 类别数 × 网格高度 × 网格宽度 的张量
+    # pose:     序列长度 × 3 的相对位姿 [x, y, theta]
+    # abs_pose: 序列长度 × 3 的绝对位姿 [x, y, theta]
     def rotate_map(self, grid, rel_pose, abs_pose):
             # grid -- sequence len x number of classes x grid_dim x grid_dim
             # rel_pose -- sequence len x 3
@@ -148,13 +154,17 @@ class SemanticGrid(object):
             current_map[inds[0],inds[1],inds[2],inds[3]] /= 2
             self.per_class_uncertainty_map = current_map
 
-
+    # 全局融合
     def update_proj_grid_bayes(self, geo_grid):
+        # geo_grid 维度含义：[批次大小, 时间步, 类别数, 网格高, 网格宽]   通过print可知， size为[1, 1, 3, 384, 384]
         # Input geo_grid -- B x T (or 1) x num_of_classes x grid_dim x grid_dim
         # Update the ground-projected grid at each location
+
+        # step_geo_grid 用来保存“每个时间步的累计后全局分布快照”（所以有 T 维）。
         step_geo_grid = torch.zeros((geo_grid.shape[0], geo_grid.shape[1], self.spatial_labels, 
-                                            self.grid_dim[0], self.grid_dim[1]), dtype=torch.float32).to(geo_grid.device)      
-        for i in range(geo_grid.shape[1]): # sequence
+                                            self.grid_dim[0], self.grid_dim[1]), dtype=torch.float32).to(geo_grid.device)
+
+        for i in range(geo_grid.shape[1]): # sequence 取第 i 步的新观测（世界系下）。但其实就1步
             new_proj_grid = geo_grid[:,i,:,:,:]
             mul_proj_grid = new_proj_grid * self.proj_grid
             normalization_grid = torch.sum(mul_proj_grid, dim=1, keepdim=True)

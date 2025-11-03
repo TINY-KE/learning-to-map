@@ -45,7 +45,7 @@ class NavTester(object):
         # point to our generated test episodes
         print("     [zhjd-debug] options.test_set:", options.test_set)
         # self.options.episodes_root = "habitat-api/data/datasets/objectnav/mp3d/"+self.options.test_set+"/"
-        self.options.episodes_root = "dataset/test_for_object_goal_navigation/hard/"+self.options.test_set+"/"
+        self.options.episodes_root = "dataset/test_for_object_goal_navigation/"+self.options.test_set+"/"
         print("     [zhjd-debug] options.episodes_root:", options.episodes_root)
 
         # 3. 读取数据集与场景
@@ -53,8 +53,10 @@ class NavTester(object):
         print("     [zhjd-debug] options.config_test_file:", options.config_test_file)  # options.config_test_file: configs/my_objectnav_mp3d_test.yaml
         self.scene_id = scene_id
         self.test_ds = HabitatDataScene(self.options, config_file=self.options.config_test_file, scene_id=self.scene_id)
+        print('[zhjd-localization] NavTester init')
 
-        # 4. 组模型（Ensemble）加载: TODO: 加载多个预测器（结构相同但训练进程不同），推理时求均值/方差以稳健与不确定度估计。
+        # 4. 组模型（Ensemble）加载， 注意 一个模型中同时包含了net1和net2
+        # TODO: 加载多个预测器（结构相同但训练进程不同），推理时求均值/方差以稳健与不确定度估计。
         print("     [zhjd-debug] options.ensemble_dir:", options.ensemble_dir)
         ensemble_exp = os.listdir(self.options.ensemble_dir) # ensemble_dir should be a dir that holds multiple experiments
         print("     [zhjd-debug] ensemble_exp:", ensemble_exp)
@@ -173,39 +175,44 @@ class NavTester(object):
     # 在main.py中调用
     # 3) 导航测试主流程：
     def test_navigation(self):
+        print('[zhjd-localization] NavTester test_navigation')
 
-        with torch.no_grad():  # 关闭梯度
-
+        with torch.no_grad():  # 关闭梯度 （只推理不训练）。
+            # 预先建 4 个列表累积指标（距离、成功率、SPL、SoftSPL）。
             list_dist_to_goal, list_success, list_spl, list_soft_spl = [],[],[],[]
-
+            # 外层 for：遍历测试数据集 self.test_ds 的每个 episode。
             for idx in range(len(self.test_ds)):    # 遍历 self.test_ds 的 episodes。
-
+                # 1. 读取 episode 元数据 + 过滤与目标标签
                 episode = self.test_ds.scene_data['episodes'][idx]
 
                 len_shortest_path = len(episode['shortest_paths'][0])
                 objectgoal = episode['object_category']
 
+                # 若objectgoal不在你定义的 可评测目标集合 self.target_sem_lbls（比如 v5 只测 chair/sofa/bed/cushion/counter/table）里，就 跳过。否则取出对应的语义类 ID sem_lbl（如 chair→1）。
                 if objectgoal not in self.target_sem_lbls.keys():
                     continue
                 else:
                     sem_lbl = self.target_sem_lbls[objectgoal]
 
+                # v3 集合中每个目标类别最多评测 ep_limit 个 episode（防止过多样本导致不均衡）。
                 if self.options.test_set=="v3":
                     if self.episode_counter[objectgoal] >= self.ep_limit:
                         continue
                     self.episode_counter[objectgoal] += 1
 
+                # 2. 目标视点集合（用于终局评测）
                 # Collect all predefined viewpoint goals for a specific object category (to use in metrics)
+                # # 目标物体实例的数量，例如len(goals)==38，说明此场景中有38 把椅子
                 goals = self.test_ds.scene_data['goals_by_category'][self.scene_id+'.glb_'+objectgoal]
+                # 所有这些目标实例的所有视点(view-points)总数。
                 episode_goal_positions = [ viewpoint['agent_state']['position']
                                            for goal in goals
                                            for viewpoint in goal['view_points'] ]
 
-
                 print("Ep:", idx, objectgoal, "Sem lbl:", sem_lbl, "Len:", len_shortest_path)
                 self.step_count+=1 # episode counter for tensorboard
 
-
+                # 3. 准备语义映射需要的实例→类别映射
                 if not self.options.occ_from_depth or self.options.use_semantic_sensor:
                     scene = self.test_ds.sim.semantic_annotations()
                     instance_id_to_label_id = {int(obj.id.split("_")[-1]): obj.category.index() for obj in scene.objects}
@@ -217,55 +224,79 @@ class NavTester(object):
                         instance_id_to_label_id_spatial[inst_id] = viz_utils.label_conversion_40_3[curr_lbl]
                         instance_id_to_label_id_objects[inst_id] = viz_utils.label_conversion_40_27[curr_lbl]
 
-
+                # 4. 重置模拟器、获取第一帧观测
                 self.test_ds.sim.reset()
                 self.test_ds.sim.set_agent_state(episode["start_position"], episode["start_rotation"])
                 sim_obs = self.test_ds.sim.get_sensor_observations()
                 observations = self.test_ds.sim._sensor_suite.get_observations(sim_obs)
 
+                # 5. 初始化全局语义地图（指的是几何占据栅格地图？）
                 # For each episode we need a new instance of a fresh global grid
                 sg = SemanticGrid(1, self.test_ds.grid_dim, self.test_ds.crop_size[0], self.test_ds.cell_size,
                                     spatial_labels=self.test_ds.spatial_labels, object_labels=self.test_ds.object_labels)
 
+                # 6. 初始化 局部策略
                 # Initialize the local policy hidden state
                 self.l_policy.reset()
 
-                abs_poses = []
+                # 7. 初始化 内部变量，包括Long-Term Goal、每步的绝对位姿abs_poses、统计轨迹长度agent_episode_distance
+                abs_poses = []  # 每步的绝对位姿，用于坐标变换与地图配准
                 agent_height = []
                 t = 0
                 ltg_counter=0
-                ltg = torch.zeros((1, 1, 2), dtype=torch.int64).to(self.device)
-                agent_episode_distance = 0.0 # distance covered by agent at any given time in the episode
+                ltg = torch.zeros((1, 1, 2), dtype=torch.int64).to(self.device)  # TODO: Long-Term Goal, 通过后续的计算得到。
+                agent_episode_distance = 0.0 # distance covered by agent at any given time in the episode   统计轨迹长度，用于 SPL 指标
                 previous_pos = self.test_ds.sim.get_agent_state().position
 
+                # 8. 时间步循环（核心感知→建图→预测→决策）
                 while t < self.options.max_steps:
-
+                    # 9. 读取三种模态：RGB、深度、语义（实例真值）。
                     img = observations['rgb'][:,:,:3]
+                    # viz_utils.show_image(img, "rgb")
+
                     depth = observations['depth'].reshape(self.test_ds.img_size[0], self.test_ds.img_size[1], 1)
                     semantic = observations['semantic']
 
-                    if self.test_ds.cfg_norm_depth:
+                    # 可选：把归一化深度还原到米单位。
+                    if self.test_ds.cfg_norm_depth:   # zhjd： 为true
                         depth = utils.unnormalize_depth(depth, min=self.test_ds.min_depth, max=self.test_ds.max_depth)
 
-                    # 3d info
+                    # 10. 3d 点云：   用深度 + 内参把像素点反投影成相机坐标系下 3D 点云（局部 3D）。
                     local3D_step = utils.depth_to_3D(depth, self.test_ds.img_size, self.test_ds.xs, self.test_ds.ys, self.test_ds.inv_K)
 
-                    agent_pose, y_height = utils.get_sim_location(agent_state=self.test_ds.sim.get_agent_state())
-
+                    # 11. 记录当前绝对位姿，计算相对起点的位姿 _rel_pose。
+                    agent_pose, y_height = utils.get_sim_location(agent_state=self.test_ds.sim.get_agent_state())   # pose = x, y, yaw
                     abs_poses.append(agent_pose)
                     agent_height.append(y_height)
-
                     # get the relative pose with respect to the first pose in the sequence
                     rel = utils.get_rel_pose(pos2=abs_poses[t], pos1=abs_poses[0])
                     _rel_pose = torch.Tensor(rel).unsqueeze(0).float()
                     _rel_pose = _rel_pose.to(self.device)
-
+                    # TODO: pose_coords：把位姿投到地图格子坐标（便于在地图上定位 agent）。
                     pose_coords = tutils.get_coord_pose(sg, _rel_pose, abs_poses[0], self.test_ds.grid_dim[0], self.test_ds.cell_size, self.device) # B x T x 3
 
+                    # 12. TODO: 地面投影2D栅格地图
                     # do ground-projection, update the map
                     if self.options.occ_from_depth:
-                        ego_grid_sseg_3 = map_utils.est_occ_from_depth([local3D_step], grid_dim=self.test_ds.grid_dim, cell_size=self.test_ds.cell_size, 
-                                                                                    device=self.device, occupancy_height_thresh=self.options.occupancy_height_thresh)
+                        ego_grid_sseg_3 = map_utils.est_occ_from_depth([local3D_step], grid_dim=self.test_ds.grid_dim, cell_size=self.test_ds.cell_size,
+                                                                                     device=self.device, occupancy_height_thresh=self.options.occupancy_height_thresh)
+                        # print("     [zhjd-localization] NavTester test_navigation 4")
+                        # # 取出第2帧
+                        # grid = ego_grid_sseg_3[0]  # shape: [3, H, W]
+                        # # 找出哪些位置不是 (1/3, 1/3, 1/3)
+                        # uniform_value = 1.0 / 3.0
+                        # mask_non_uniform = torch.any(torch.abs(grid - uniform_value) > 1e-6, dim=0)
+                        # # 统计和输出
+                        # num_non_uniform = mask_non_uniform.sum().item()
+                        # print(f"非均匀栅格数量: {num_non_uniform}")
+                        # # 如果想打印出具体坐标和值
+                        # if num_non_uniform > 0:
+                        #     ys, xs = torch.nonzero(mask_non_uniform, as_tuple=True)
+                        #     for i in range(min(10, len(xs))):  # 最多打印10个以防太多
+                        #         y, x = ys[i].item(), xs[i].item()
+                        #         vals = grid[:, y, x].cpu().numpy()
+                        #         print(f"位置 (x={x}, y={y}) 的值: {vals}")
+
                     else:
                         # in this case we use the semantic sensor to obtain the ground-projection during the episode
                         ssegData = np.expand_dims(semantic.cpu().numpy(), 0).astype(float) # 1 x H x W
@@ -273,18 +304,25 @@ class NavTester(object):
                         ssegs_spatial = torch.from_numpy(ssegData_spatial).unsqueeze(0).float()
                         ego_grid_sseg_3 = map_utils.ground_projection([self.test_ds.points2D_step], [local3D_step], ssegs_spatial, sseg_labels=self.test_ds.spatial_labels,
                                                                                             grid_dim=self.test_ds.grid_dim, cell_size=self.test_ds.cell_size)
-
+                    # 13. TODO: 地图对齐与融合
                     # Transform the ground projected egocentric grids to geocentric using relative pose
+                    # 把当前步的 ego 栅格 用 _rel_pose 变换到全局坐标系（geo）
                     geo_grid_sseg = sg.spatialTransformer(grid=ego_grid_sseg_3, pose=_rel_pose, abs_pose=torch.tensor(abs_poses).to(self.device))
+                    #  [zhjd-debug] geo_grid_sseg 的尺寸: torch.Size([1, 3, 384, 384])
+                    #  [zhjd-debug] geo_grid_sseg 的详细维度: torch.Size([1, 3, 384, 384])
                     # step_geo_grid contains the map snapshot every time a new observation is added
+                    # 利用贝叶斯更新，融合到“时间累积”的全局地图
                     step_geo_grid_sseg = sg.update_proj_grid_bayes(geo_grid=geo_grid_sseg.unsqueeze(0))
                     # transform the projected grid back to egocentric (step_ego_grid_sseg contains all preceding views at every timestep)
                     step_ego_grid_sseg = sg.rotate_map(grid=step_geo_grid_sseg.squeeze(0), rel_pose=_rel_pose, abs_pose=torch.tensor(abs_poses).to(self.device))
                     # Crop the grid around the agent at each timestep
                     step_ego_grid_crops = map_utils.crop_grid(grid=step_ego_grid_sseg, crop_size=self.test_ds.crop_size)
 
+                    # 14. TODO: 图像分割（可选） + 地图预测（集成/不集成）
                     # Run the image segmentation, map prediction and uncertainty
                     if self.options.with_img_segm:
+                        # 若启用 图像分割，先跑 img_segmentor 得到 egocentric 预测分割栅格，作为 map predictor 的额外输入（或监督）。
+
                         imgData = utils.preprocess_img(img, cropSize=self.img_segm_size, pixFormat='NCHW', normalize=True)
                         depth_resize = depth.clone().permute(2,0,1).unsqueeze(0)
                         depth_img = F.interpolate(depth_resize, size=self.img_segm_size, mode='nearest')
@@ -292,15 +330,20 @@ class NavTester(object):
                         img_segm_input = {'images': imgData.unsqueeze(0).unsqueeze(0),
                                           'depth_imgs': depth_img.unsqueeze(0)}
 
+                        # 用仿真真值监督图像分割（可选）
                         if self.options.use_semantic_sensor:
                             # get img segmentation from the simulator's semantic sensor
                             ssegData = np.expand_dims(semantic.cpu().numpy(), 0).astype(float) # 1 x H x W
                             ssegData_objects = np.vectorize(instance_id_to_label_id_objects.get)(ssegData.copy()) # convert instance ids to category ids
                             ssegs_objects = torch.from_numpy(ssegData_objects).unsqueeze(0).unsqueeze(0).float()
                             img_labels = ssegs_objects.clone()
+                            # debug_visual_ssegData = img_labels.squeeze()  #  (1,H,W) -> (H,W)
+                            # viz_utils.show_image_sseg_2d_label(debug_visual_ssegData, "Colored Semantic Segmentation")
+
                         else:
                             img_labels = None
-                            
+
+                        # net3
                         pred_ego_crops_sseg = utils.run_img_segm(model=self.img_segmentor,
                                                                      input_batch=img_segm_input,
                                                                      object_labels=self.test_ds.object_labels,
@@ -312,11 +355,14 @@ class NavTester(object):
                                                                      points2D_step=self.points2D_step,
                                                                      img_labels=img_labels)
 
+                        # net1和2
+                        # 地图预测器（通常是你加载的 ensemble 的 predictor）
                         mean_ensemble_prediction, mean_ensemble_spatial, per_class_uncertainty = self.run_map_predictor(step_ego_grid_crops, pred_ego_crops_sseg)
                     else:
                         mean_ensemble_prediction, mean_ensemble_spatial, per_class_uncertainty = self.run_map_predictor(step_ego_grid_crops)
 
 
+                    # 15. todo: 把本步预测融合进全局地图
                     # add crop uncertainty to uncertainty map
                     sg.register_per_class_uncertainty(per_class_uncertainty_crop=per_class_uncertainty, pose=_rel_pose, abs_pose=torch.tensor(abs_poses, device=self.device))
                     # add semantic prediction to semantic map
@@ -325,6 +371,7 @@ class NavTester(object):
 
                     ltg_dist = torch.linalg.norm(ltg.clone().float()-pose_coords.float())*self.options.cell_size # distance to current long-term goal
 
+                    # 16. TODO: 规划长期目标（long-term goal, LTG）
                     # Estimate long term goal
                     if ((ltg_counter % self.options.steps_after_plan == 0) or  # either every k steps
                        (ltg_dist < 0.2)): # or we reached ltg
@@ -336,7 +383,7 @@ class NavTester(object):
                         ltg_counter = 0 # reset the ltg counter
                     ltg_counter += 1
 
-
+                    # 17. （可选）可视化保存
                     # Option to save visualizations of steps
                     if self.options.save_nav_images:
                         save_img_dir_ = self.options.save_img_dir_+'ep_'+str(idx)+'_'+objectgoal+'/'
@@ -356,7 +403,7 @@ class NavTester(object):
 
 
                     ##### Action decision process #####
-
+                    # 18. 行动选择与环境交互
                     # At every step find the distance to the closest predicted occurence of the target
                     _, obj_dist, _ = tutils.get_closest_target_location(sg, pose_coords.clone(), sem_lbl, self.options.cell_size, self.sem_thresh)
                     
@@ -435,7 +482,6 @@ class NavTester(object):
                 json.dump(self.results, outfile, indent=4)
 
 
-
     def run_local_policy(self, depth, goal, pose_coords, rel_agent_o, step):
         planning_goal = goal.squeeze(0).squeeze(0)
         planning_pose = pose_coords.squeeze(0).squeeze(0)
@@ -451,26 +497,35 @@ class NavTester(object):
 
 
     def run_map_predictor(self, step_ego_grid_crops, pred_ego_crops_sseg=None):
-
+        # 1、输入构造阶段
         input_batch = {'step_ego_grid_crops_spatial': step_ego_grid_crops.unsqueeze(0)}
         if self.options.with_img_segm:
             input_batch['pred_ego_crops_sseg'] = pred_ego_crops_sseg
         input_batch = {k: v.to(self.device) for k, v in input_batch.items()}
 
+        # 2、让每个 ensemble 模型独立预测
         model_pred_output = {} # keep track of each individual model predictions to apply the loss later
         ensemble_pred_maps = []
         ensemble_spatial_maps = []        
         for n in range(self.options.ensemble_size):
+            # 启动神经网络
             model_pred_output[n] = self.models_dict[n]['predictor_model'](input_batch)
+            # 提取 语义地图 和 几何地图
             ensemble_pred_maps.append(model_pred_output[n]['pred_maps_objects'].clone())
             ensemble_spatial_maps.append(model_pred_output[n]['pred_maps_spatial'].clone())
+        # 3、 将多个模型预测结果堆叠
         ensemble_pred_maps = torch.stack(ensemble_pred_maps) # N x B x T x C x cH x cW
         ensemble_spatial_maps = torch.stack(ensemble_spatial_maps)
 
+
+        # 4、求平均预测（Ensemble 平均），得到的就是 融合后的预测结果，通常用于最终导航或评估。
         ### Estimate average predictions from the ensemble
+        # TODO: 各模型预测的平均语义图
         mean_ensemble_prediction = torch.mean(ensemble_pred_maps, dim=0) # B x T x C x cH x cW
+        # TODO: 各模型预测的平均空间图
         mean_ensemble_spatial = torch.mean(ensemble_spatial_maps, dim=0) # B x T x C x cH x cW
 
+        # 5、TODO: 【方差】计算每个类别的方差（预测不确定性）. 每个类别的方差（variance） 就代表了模型对该类别在某个像素位置的 不确定性（uncertainty）。
         B, T, C, cH, cW = model_pred_output[0]['pred_maps_objects'].shape
         ### Estimate the variance of each class for each location # 1 x B x T x object_classes x crop_dim x crop_dim
         ensemble_var = torch.zeros((1, B, T, C, cH, cW), dtype=torch.float32).to(self.device)
@@ -478,6 +533,7 @@ class NavTester(object):
             ensemble_class = ensemble_pred_maps[:,:,:,i,:,:]
             ensemble_class_var = torch.var(ensemble_class, dim=0, keepdim=True)
             ensemble_var[:,:,:,i,:,:] = ensemble_class_var
+        # TODO: 各类像素的不确定性图
         per_class_uncertainty = ensemble_var.squeeze(0) # B x T x C x cH x cW
 
         return mean_ensemble_prediction, mean_ensemble_spatial, per_class_uncertainty

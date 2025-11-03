@@ -7,7 +7,7 @@ import quaternion
 import datasets.util.viz_utils as viz_utils
 import datasets.util.map_utils as map_utils
 import torch.nn.functional as F
-
+import matplotlib.pyplot as plt
 
 def add_uniform_noise(tensor, a, b):
     return tensor + torch.FloatTensor(tensor.shape).uniform_(a, b).to(tensor.device)
@@ -41,9 +41,16 @@ def get_entropy(pred):
 
 
 def get_sim_location(agent_state):
+    # 说明 坐标的顺序为  y height x
+    # Habitat/Scene 常用的是 Y 为上 的右手坐标系：(X, Y, Z)，其中 相机/代理朝向通常与 -Z 有关。
+    # 你的平面栅格坐标（用于2D地面地图）希望采用：x=前进方向、y=左/右方向、z不用。
+    # 因此做了一个简单的世界→平面网格的轴重映射：
+    #   “面向 -Z”变为“+x 前方”
+    #   Y轴即高度
     x = -agent_state.position[2]
     y = -agent_state.position[0]
     height = agent_state.position[1]
+    #
     axis = quaternion.as_euler_angles(agent_state.rotation)[0]
     if (axis%(2*np.pi)) < 0.1 or (axis%(2*np.pi)) > 2*np.pi - 0.1:
         o = quaternion.as_euler_angles(agent_state.rotation)[1]
@@ -119,16 +126,34 @@ def depth_to_3D(depth_obs, img_size, xs, ys, inv_K):
     return local3D
 
 
-
+# model：图像语义分割网络（接收 RGB/Depth 等，输出每像素对各物体类的 logits/prob）。  net1
+# input_batch：包含 images 与 depth_imgs 等字段：
+# images：形状一般是 [B, T, 3, H, W]（或作者自定义的 NCHW 批次维度组合）；
+# depth_imgs：深度序列，通常 [B, T, 1, H, W]。
+# object_labels：物体类数 C_obj（整数）。
+# crop_size：地面裁剪网格尺寸 (cH, cW)。
+# cell_size：地面栅格每格代表的实际米数（分辨率）。
+# xs, ys：用于由深度反投影成 3D 的归一化像素网格（通常是 np.meshgrid/torch.meshgrid 得到的坐标模板）。
+# inv_K：相机内参矩阵的逆，用于把像素坐标+深度变成相机坐标系 3D 点。
+# points2D_step：每一帧要投影的像素坐标（N×2），通常是把网格 [0..H-1]×[0..W-1] 展平后的像素位置列表。
+# img_labels：若给了，就是现成的像素标签（比如来自 Habitat 的 semantic 传感器）；若没给，就用 model 做预测生成。
 def run_img_segm(model, input_batch, object_labels, crop_size, cell_size, xs, ys, inv_K, points2D_step, img_labels=None):
-    
+
     if img_labels == None: # use the pre-trained semantic segmentation model
-        pred_img_segm = model(input_batch)
-        # get labels from prediction
+        pred_img_segm = model(input_batch)  # pred_img_segm在类别维度（第二维）上有27层，代表27类物体
+        # 将类别维度通过argmax压缩到“一层”，即可能性最大的物体类比。get labels from prediction
         img_labels = torch.argmax(pred_img_segm['pred_segm'].detach(), dim=2, keepdim=True) # B x T x 1 x cH x cW
+        # debug_visual_ssegData = img_labels.squeeze()  # (1,1,1,H,W) ->` (H,W)
+        # viz_utils.show_image_sseg_2d_label(debug_visual_ssegData, "Colored Semantic Segmentation by net")
 
     # ground-project the predicted segm
     depth_imgs = input_batch['depth_imgs']
+    # print("depth_imgs shape:", depth_imgs.shape)   # [1, 1, 1, 128, 128]
+    # print("dtype:", depth_imgs.dtype)
+    # print("device:", depth_imgs.device)
+    # print("min:", depth_imgs.min().item(), "max:", depth_imgs.max().item())  # min: 0.0 max:  2.47973394393920
+    # import time
+    # time.sleep(50)  # 暂停50秒再继续
     pred_ego_crops_sseg = torch.zeros((depth_imgs.shape[0], depth_imgs.shape[1], object_labels,
                                                     crop_size[0], crop_size[1]), dtype=torch.float32).to(depth_imgs.device)
     for b in range(depth_imgs.shape[0]): # batch size
@@ -137,18 +162,42 @@ def run_img_segm(model, input_batch, object_labels, crop_size, cell_size, xs, ys
         local3D = []
         for i in range(depth_imgs.shape[1]): # sequence
 
+            # 将[depth_value, H, W] 变为 [H, W, depth_value]
             depth = depth_imgs[b,i,:,:,:].permute(1,2,0)
             local3D_step = depth_to_3D(depth, img_size=(depth.shape[0],depth.shape[1]), xs=xs, ys=ys, inv_K=inv_K)
+            # print("local3D_step shape:", local3D_step.shape)  # [16384, 3]
+            # print("dtype:", local3D_step.dtype)
+            # print("device:", local3D_step.device)
+            # print("min:", local3D_step[:,2].min().item(), "max:", local3D_step[:,2].max().item())   # min: -1.748591423034668 max: 0.
+            # import time
+            # time.sleep(50)  # 暂停50秒再继续
 
+            # points2D_step 是对应的像素坐标（通常展开为 N×2），保证与 local3D_step 一一对应，后续投影函式会把这些3D点按像素标签“落地”到地面栅格。
             points2D.append(points2D_step)
             local3D.append(local3D_step)
 
         pred_ssegs = img_labels[b,:,:,:,:]
+        # print("pred_ssegs shape:", pred_ssegs.shape)  # [1, 1, 128, 128]
+        # print("dtype:", pred_ssegs.dtype)
+        # print("device:", pred_ssegs.device)
+        # print("min:", pred_ssegs.min().item(), "max:",    pred_ssegs.max().item())  # min: 0 max: 26
+        # import time
+        # time.sleep(50)  # 暂停50秒再继续
 
         # use crop_size directly for projection
         pred_ego_crops_sseg_seq = map_utils.ground_projection(points2D, local3D, pred_ssegs,
                                                             sseg_labels=object_labels, grid_dim=crop_size, cell_size=cell_size)
+        # print("pred_ego_crops_sseg_seq shape:", pred_ego_crops_sseg_seq.shape)  # [1, 27, 64, 64]
+        # print("dtype:", pred_ego_crops_sseg_seq.dtype)
+        # print("device:", pred_ego_crops_sseg_seq.device)
+        # print("min:", pred_ego_crops_sseg_seq.min().item(), "max:", pred_ego_crops_sseg_seq.max().item())  # min: 1.0660980542809284e-08 max: 1.000010013580322
+        # import time
+        # time.sleep(50)  # 暂停50秒再继续
+        # # 可视化
+        # viz_utils.show_image_color_and_extract(pred_ego_crops_sseg_seq,"Predicted Egocentric Crop (Semantic Segmentation)", 27)
+
         pred_ego_crops_sseg[b,:,:,:,:] = pred_ego_crops_sseg_seq
+
     return pred_ego_crops_sseg
 
 

@@ -265,3 +265,88 @@ def save_map_pred_steps(spatial_in, spatial_pred, objects_pred, ego_img_segm, sa
 
 
 
+# zhjd
+def add_border(img, color=(255, 0, 0), thickness=5):
+    # 如果是 (C,H,W)，转为 (H,W,C)
+    if img.ndim == 3 and img.shape[0] == 3:
+        img = img.permute(1, 2, 0)
+
+    if isinstance(img, torch.Tensor):
+        img = img.detach().cpu().numpy()
+
+    img = (img * 255).astype(np.uint8) if img.max() <= 1 else img.copy()
+
+    h, w, c = img.shape
+    img[:thickness, :, :] = color  # top
+    img[-thickness:, :, :] = color  # bottom
+    img[:, :thickness, :] = color  # left
+    img[:, -thickness:, :] = color  # right
+    return img
+
+def to_5d(t):
+    t = torch.tensor(t)
+    while t.ndim < 5:
+        t = t.unsqueeze(0)  # 在最前面添加一个新维度。例如原来是 (64, 64) → 变成 (1, 64, 64)
+    return t
+
+# === 用 colorize_grid 上色 ===
+def color_and_extract(grid, color_mapping):
+    colorized = colorize_grid(to_5d(grid), color_mapping=color_mapping)
+    # 输出可能是 (3,H,W) 或 (1,3,H,W) 或 (1,1,3,H,W)
+    colorized = torch.tensor(colorized)
+    if colorized.ndim == 5:
+        colorized = colorized[0, 0]
+    elif colorized.ndim == 4:
+        colorized = colorized[0]
+    # 现在 colorized 应为 (3,H,W)
+    colorized.permute(1, 2, 0) # 转为 (H,W,3)
+    colorized_border = add_border(colorized, color=(10, 10, 10), thickness=1)
+    return colorized_border
+
+def show_image_color_and_extract(tensor_or_array, title="image", color_mapping=27):
+    if isinstance(tensor_or_array, torch.Tensor):
+        img = tensor_or_array.detach().cpu().numpy()
+    else:
+        img = np.array(tensor_or_array)
+    img = color_and_extract(img, color_mapping=color_mapping)
+    plt.imshow(img)
+    plt.title(title)
+    plt.axis('off')
+    plt.show()
+
+def show_image(tensor_or_array, title="image"):
+    if isinstance(tensor_or_array, torch.Tensor):
+        img = tensor_or_array.detach().cpu().numpy()
+    else:
+        img = np.array(tensor_or_array)
+    if img.ndim == 3 and img.shape[0] in [1, 3]:
+        img = np.transpose(img, (1, 2, 0))
+    plt.imshow(img)
+    plt.title(title)
+    plt.axis('off')
+    plt.show()
+
+
+def show_image_sseg_2d_label(tensor_or_array, title="image"):
+
+    if isinstance(tensor_or_array, torch.Tensor):
+        img = tensor_or_array.detach().cpu().numpy()
+    else:
+        img = np.array(tensor_or_array)
+
+    # 2️⃣ 确保是二维标签图 [H,W]
+    assert img.ndim == 2, f" [zhjd-debug] Expected 2D label map, got shape {img.shape}"
+
+    H, W = img.shape
+    rgb_img = np.zeros((H, W, 3), dtype=np.uint8)
+
+    # 3️⃣ 将每个 label 转成 RGB
+    for lbl, color in color_mapping_27.items():
+        mask = img == lbl
+        rgb_img[mask] = color
+
+    # 4️⃣ 显示结果
+    plt.imshow(rgb_img)
+    plt.title(title)
+    plt.axis('off')
+    plt.show()

@@ -72,8 +72,8 @@
         "8194nk5LbLH"
     ],
     "gpu_capacity": 2,
-    "test_set": "v5",
-    "use_semantic_sensor": false,
+    "test_set": "v3",
+    "use_semantic_sensor": true,
     "occupancy_height_thresh": -1.0,
     "sem_thresh": 0.75,
     "summary_dir": "/home/robotlab/L2M/zhjd_logs/test_exp/tensorboard",
