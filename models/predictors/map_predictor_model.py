@@ -29,7 +29,7 @@ class MapPredictorHier(nn.Module):
         # 调用子模型进行语义预测
         # 可选的 pred_ego_crops_sseg：图像语义分割（如果启用了 with_img_segm）
         if self.with_img_segm:
-            pred_maps_raw_spatial, pred_maps_raw_objects = self._segmentation_model(step_ego_crops, batch['pred_ego_crops_sseg'])  # SemMapTester 用的是这个，
+            pred_maps_raw_spatial, pred_maps_raw_objects = self._segmentation_model(step_ego_crops, batch['pred_ego_crops_sseg'])  # 这里指的是work1前两个unet组成的网络，而不是语义分割网络. SemMapTester 用的是这个.
         else:
             pred_maps_raw_spatial, pred_maps_raw_objects = self._segmentation_model(step_ego_crops)
 

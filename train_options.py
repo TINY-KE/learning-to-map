@@ -149,6 +149,13 @@ class TrainOptions(BaseOptions):
 
         self.parser.add_argument('--save_nav_images', dest='save_nav_images', action='store_true',
                                  help='Keep track and store maps during navigation testing')
+        self.parser.add_argument(
+            '--save_img_dir',
+            type=str,
+            dest='save_img_dir',
+            default='/home/robotlab/L2M/zhjd_save_imgs/',
+            help='Directory to save navigation visualization images when --save_nav_images is enabled'
+        )
 
         self.parser.add_argument('--a_1', type=float, dest='a_1', default=0.1,
                                  help='hyperparameter for choosing long-term-goal')
@@ -208,3 +215,7 @@ class TrainOptions(BaseOptions):
 
         self.parser.add_argument('--sem_thresh', dest='sem_thresh', type=float, default=0.75,
                                 help='used to identify possible targets in the semantic map')
+
+        # zhjd
+        self.parser.add_argument('--ensemble_dir_rsmp', type=str, dest='ensemble_dir_rsmp', default=None,
+                                 help='Path containing the experiments comprising the ensemble')

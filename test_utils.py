@@ -105,7 +105,8 @@ def get_closest_target_location(sg, pose_coords, sem_lbl, cell_size, sem_thresh)
     prob = sem_lbl_map[coord[1], coord[0]] 
     return coord, min_dist, prob
 
-
+# p_map：在全局语义地图 sg.sem_grid 中，目标类 sem_lbl 的后验概率。
+# sigma_map：该类在每个栅格的不确定性（方差开根）。
 def get_cost_map(sg, sem_lbl, a_1, a_2):
     p_map = sg.sem_grid[:, sem_lbl, :, :]
     sigma_map = torch.sqrt(sg.per_class_uncertainty_map[:, sem_lbl, :, :])

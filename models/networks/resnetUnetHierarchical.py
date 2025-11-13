@@ -79,16 +79,28 @@ class ResNetUNetHierarchical(nn.Module):
 
         self.with_img_segm = with_img_segm
 
+        # TODO: (1) 第一阶段：unet1
+        # 输入：3 个通道（spatial map：void/occupied/free）
+        # 输出：同样 3 个通道（空间预测）
         # takes 3 spatial classes, outputs 3 spatial classes
         self.unet1 = ResNetUnetBlock(n_channel_in=out1_n_class, n_class_out=out1_n_class)
 
+
         if with_img_segm:
             # 3 spatial classes + 1 coming from reduction of channels from object classes from img segmentation
+            # todo： 把图像分割结果（27 通道）降维成 1 通道； 与 out1（3 通道）拼接成 4 通道；
             input_n_dim = out1_n_class + 1
+            # 定义了一个 1×1 卷积层：
+            # 输入通道数 = 27
+            # 输出通道数 = 1
+            # 卷积核大小 = 1
+            # padding = 0
+            # 激活函数：BatchNorm + ReLU
             self.layer_imgSegm_in = convrelu(out2_n_class, 1, 1, 0)
         else:
             input_n_dim = out1_n_class
 
+        # TODO: (2) 第一阶段：unet2
         self.unet2 = ResNetUnetBlock(n_channel_in=input_n_dim, n_class_out=out2_n_class)
 
 
@@ -102,6 +114,7 @@ class ResNetUNetHierarchical(nn.Module):
             B, T, C, cH, cW = img_segm.shape
             img_segm = img_segm.view(B*T,C,cH,cW)
 
+            # todo： 把图像分割结果（27 通道）降维成 1 通道； 与 out1（3 通道）拼接成 4 通道；
             # reducing img segm channels from 27 to 1
             img_segm_in = self.layer_imgSegm_in(img_segm)
             

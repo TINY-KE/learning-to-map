@@ -236,7 +236,8 @@ def slice_scene(x, y, z, label_seq, height):
     label_seq_fil = torch.tensor(label_seq[inds], dtype=torch.float, device='cuda')
     return x_fil, y_fil, label_seq_fil
 
-
+# 根据全局semantic map中的几何地图proj_grid，判断各栅格的几何概率是否大于0.5。
+# 这是因为几何信息作为一个低纬度信息，在体现观测区域的可靠性上，更加鲁邦。
 def get_explored_grid(grid_sseg, thresh=0.5):
     # Use the ground-projected ego grid to get observed/unobserved grid
     # Single channel binary value indicating cell is observed
@@ -244,8 +245,12 @@ def get_explored_grid(grid_sseg, thresh=0.5):
     # Returns T x 1 x H x W
     T, C, H, W = grid_sseg.shape
     grid_explored = torch.ones((T, 1, H, W), dtype=torch.float32).to(grid_sseg.device)
+    # # 取每格“最可能”的类的概率
     grid_prob_max = torch.amax(grid_sseg, dim=1)
+    # 若 max prob <= 阈值，说明这格仍然“不确定”（像初始先验 1/3,1/3,1/3），这些点会被标记为 1（表示未探索的区域）
+    # torch.nonzero(tensor) 返回一个张量，包含所有非零元素的索引。形状为 (N, 3)，N 是未探索点的数量，每行表示一个坐标 (t, h, w)，即时间步 t 和坐标 (h, w)。
     inds = torch.nonzero(torch.where(grid_prob_max<=thresh, 1, 0))
+    # 在 grid_explored 中对应位置设置为 0，表示这些区域尚未被探索。
     grid_explored[inds[:,0], 0, inds[:,1], inds[:,2]] = 0
     return grid_explored
 

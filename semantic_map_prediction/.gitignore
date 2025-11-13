@@ -1,0 +1,12 @@
+# 忽略 .idea 文件夹（PyCharm等IDE配置）
+.idea/
+*.iws
+*.iml
+*.ipr
+
+# 忽略路径模型相关文件
+path-model/
+path_model/
+zhjd_logs/
+path-log/
+zhjd_save_imgs/

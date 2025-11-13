@@ -289,15 +289,17 @@ def to_5d(t):
         t = t.unsqueeze(0)  # 在最前面添加一个新维度。例如原来是 (64, 64) → 变成 (1, 64, 64)
     return t
 
+fix_extract = 0
+
 # === 用 colorize_grid 上色 ===
 def color_and_extract(grid, color_mapping):
     colorized = colorize_grid(to_5d(grid), color_mapping=color_mapping)
     # 输出可能是 (3,H,W) 或 (1,3,H,W) 或 (1,1,3,H,W)
     colorized = torch.tensor(colorized)
     if colorized.ndim == 5:
-        colorized = colorized[0, 0]
+        colorized = colorized[0, fix_extract]
     elif colorized.ndim == 4:
-        colorized = colorized[0]
+        colorized = colorized[fix_extract]
     # 现在 colorized 应为 (3,H,W)
     colorized.permute(1, 2, 0) # 转为 (H,W,3)
     colorized_border = add_border(colorized, color=(10, 10, 10), thickness=1)
@@ -335,7 +337,13 @@ def show_image_sseg_2d_label(tensor_or_array, title="image"):
         img = np.array(tensor_or_array)
 
     # 2️⃣ 确保是二维标签图 [H,W]
-    assert img.ndim == 2, f" [zhjd-debug] Expected 2D label map, got shape {img.shape}"
+    # assert img.ndim == 2, f" [zhjd-debug] Expected 2D label map, got shape {img.shape}"
+    if img.ndim == 5:
+        img = img[0, fix_extract, 0]  # 默认显示的是第二维（time）的第 0 帧。
+    elif img.ndim == 4:
+        img = img[0, fix_extract]
+    elif img.ndim == 4:
+        img = img[fix_extract]
 
     H, W = img.shape
     rgb_img = np.zeros((H, W, 3), dtype=np.uint8)

@@ -15,10 +15,11 @@ import json
 from datasets.util import viz_utils, map_utils
 
 
-# 用于eval和test
+# 用于eval, train
 class HabitatDataOffline(Dataset):
 
     def __init__(self, options, config_file, img_segm=False, finetune=False):
+        print("     [zhjd-debug] config_file:", config_file)
         config = get_config(config_file)
         self.config = config
         
@@ -74,6 +75,7 @@ class HabitatDataOffline(Dataset):
         step_ego_grid_crops_spatial = torch.from_numpy(ep['step_ego_grid_crops_spatial'])
         gt_grid_crops_spatial = torch.from_numpy(ep['gt_grid_crops_spatial'])
         gt_grid_crops_objects = torch.from_numpy(ep['gt_grid_crops_objects'])
+        step_ego_grid_27 = torch.from_numpy(ep['step_ego_grid_27'])
 
         # 将绝对位姿转换为相对于初始位姿的相对位姿。
         ### Transform abs_pose to rel_pose
@@ -89,6 +91,7 @@ class HabitatDataOffline(Dataset):
         item['step_ego_grid_crops_spatial'] = step_ego_grid_crops_spatial
         item['gt_grid_crops_spatial'] = gt_grid_crops_spatial # Long tensor, int64
         item['gt_grid_crops_objects'] = gt_grid_crops_objects # Long tensor, int64
+        item['step_ego_grid_27'] = step_ego_grid_27 # Long tensor, int64
 
 
         if self.img_segm:

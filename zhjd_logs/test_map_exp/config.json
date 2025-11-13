@@ -48,6 +48,7 @@
     "turn_angle": 10,
     "forward_step_size": 0.25,
     "save_nav_images": false,
+    "save_img_dir": "/home/robotlab/L2M/zhjd_save_imgs/",
     "a_1": 0.1,
     "a_2": 1.0,
     "ensemble_size": 1,
@@ -73,6 +74,7 @@
     "use_semantic_sensor": false,
     "occupancy_height_thresh": -1.0,
     "sem_thresh": 0.75,
+    "ensemble_dir_rsmp": "/home/robotlab/L2M/semantic_map_prediction/path-model/smp",
     "summary_dir": "/home/robotlab/L2M/zhjd_logs/test_map_exp/tensorboard",
     "checkpoint_dir": "/home/robotlab/L2M/zhjd_logs/test_map_exp/checkpoints"
 }

@@ -1,0 +1,70 @@
+# 设备
+device: "cuda"        # "cuda" 或 "cpu"
+
+# 输入源
+input:
+  type: "folder"      # "folder" 或 "camera"
+  rgb_dir: "/path/to/rgb"          # 当 type=folder 时必填，RGB 图片目录
+  depth_dir: "/path/to/depth"      # 当 type=folder 时必填，深度 .npy 目录（H x W 浮点米）
+  rgb_ext: ".png"                  # RGB 扩展名
+  depth_ext: ".npy"                # 深度扩展名
+  loop: true                       # 循环播放
+  cam_index: 0                     # 当 type=camera 时使用，本机摄像头编号
+  depth_folder: ""                 # 当相机没有硬件深度时，可选：从此处按帧号读取 .npy 深度
+
+# L2M 模型（预训练）
+l2m:
+  device: "cuda"
+
+  # 三种方式选其一：
+  # 1) JIT 直接加载
+  # entry:
+  #   type: "jit"
+  #   path: "/path/to/l2m_model.ts"
+
+  # 2) 直接 torch.load 返回可调用模块（state_dict 或整模型）
+  entry:
+    type: "torch"
+    path: "/path/to/l2m_ckpt.pth"   # 如果是 {'state_dict':...} 结构也可
+  weights: ""                       # 如果上面 entry 走 module+class，再在这里给 state_dict；此处留空
+
+  # 3) 动态 import（当你有模块路径+类名时启用）
+  # entry:
+  #   type: "module"
+  #   module: "l2m_pkg.model_zoo.l2m_net"
+  #   class_name: "L2MNet"
+  #   extra: {}                     # 可选：构造参数
+
+  input:
+    h: 480
+    w: 480
+
+# RSMPNet 模型（预训练）
+rsmp:
+  device: "cuda"
+
+  # 同样三选一，默认走 torch.load
+  entry:
+    type: "torch"
+    path: "/path/to/rsmpnet_ckpt.pth"
+  weights: ""                       # 若使用 module+class，则在这里给 state_dict；否则留空
+
+  # 示例（动态 import）：
+  # entry:
+  #   type: "module"
+  #   module: "rsmp_pkg.models.rsmp_net"
+  #   class_name: "RSMPNet"
+  #   extra: {}                     # 可选：构造参数
+
+  input:
+    h: 480
+    w: 480
+
+# 可视化/导出
+viz:
+  show: true                        # 窗口显示
+  save_dir: ""                      # 若需要落盘可视化结果，给目录；为空则不保存
+
+# 运行时
+runtime:
+  fps_limit: 30                     # 0 表示不限制帧率

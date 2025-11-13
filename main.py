@@ -11,6 +11,9 @@ from tester import NavTester, SemMapTester
 import multiprocessing as mp
 from multiprocessing import Pool, TimeoutError
 
+# /home/robotlab/L2M/semantic_map_prediction/models/predictors/map_predictor_model.py
+from semantic_map_prediction.models.predictors.map_predictor_model import MapPredictorAM
+
 
 def active_training(options, scene_id):
     trainer = ActiveTrainer(options, scene_id)
@@ -43,9 +46,11 @@ if __name__ == '__main__':
         elif options.img_segm_training:
             trainer = TrainerSegm(options)
             trainer.train()
+
         elif options.finetune:
             trainer = TrainerFinetune(options)
             trainer.train()
+
         else:
             trainer = Trainer(options)
             trainer.train()

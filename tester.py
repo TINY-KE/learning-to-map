@@ -22,6 +22,8 @@ import cv2
 import random
 import math
 from planning.ddppo_policy import DdppoPolicy
+from semantic_map_prediction.models.predictors import get_predictor_rsmp
+
 
 # 作用：在指定场景上，用已训练好的“地图预测器 +（可选）图像分割 + 本地策略（DDPPO）”进行导航测试与度量统计；支持**多模型集成（ensemble）**与可视化、TensorBoard 记录。
 class NavTester(object):
@@ -105,8 +107,8 @@ class NavTester(object):
                 "chair": 1,  # 椅子，语义标签ID=1
                 "sofa": 5,  # 沙发，语义标签ID=5
                 "bed": 6,  # 床，语义标签ID=6
-                "cushion": 4,  # 坐垫，语义标签ID=4
-                "counter": 13,  # 柜台，语义标签ID=13
+                # "cushion": 4,  # 坐垫，语义标签ID=4
+                # "counter": 13,  # 柜台，语义标签ID=13
                 "table": 3  # 桌子，语义标签ID=3
             }
             # （2）控制测试规模。 作用：限制每个物体类别的测试次数，避免测试时间过长。
@@ -250,6 +252,9 @@ class NavTester(object):
 
                 # 8. 时间步循环（核心感知→建图→预测→决策）
                 while t < self.options.max_steps:
+                    # print(f"        [zhjd-deubg] RGB图像尺寸: {observations['rgb'].shape}")  # (256, 256, 3)
+                    # print(f"        [zhjd-deubg] 深度图像尺寸: {observations['depth'].shape}")  # (256, 256, 1)
+
                     # 9. 读取三种模态：RGB、深度、语义（实例真值）。
                     img = observations['rgb'][:,:,:3]
                     # viz_utils.show_image(img, "rgb")
@@ -314,8 +319,10 @@ class NavTester(object):
                     # 利用贝叶斯更新，融合到“时间累积”的全局地图
                     step_geo_grid_sseg = sg.update_proj_grid_bayes(geo_grid=geo_grid_sseg.unsqueeze(0))
                     # transform the projected grid back to egocentric (step_ego_grid_sseg contains all preceding views at every timestep)
+                    # 从世界坐标系转移到机器人坐标系
                     step_ego_grid_sseg = sg.rotate_map(grid=step_geo_grid_sseg.squeeze(0), rel_pose=_rel_pose, abs_pose=torch.tensor(abs_poses).to(self.device))
                     # Crop the grid around the agent at each timestep
+                    # 剪切
                     step_ego_grid_crops = map_utils.crop_grid(grid=step_ego_grid_sseg, crop_size=self.test_ds.crop_size)
 
                     # 14. TODO: 图像分割（可选） + 地图预测（集成/不集成）
@@ -357,6 +364,7 @@ class NavTester(object):
 
                         # net1和2
                         # 地图预测器（通常是你加载的 ensemble 的 predictor）
+                        # todo： 以下三类分别代表: 物体语义种类栅格图、几何栅格图、物体语义种类的不确定度的栅格图
                         mean_ensemble_prediction, mean_ensemble_spatial, per_class_uncertainty = self.run_map_predictor(step_ego_grid_crops, pred_ego_crops_sseg)
                     else:
                         mean_ensemble_prediction, mean_ensemble_spatial, per_class_uncertainty = self.run_map_predictor(step_ego_grid_crops)
@@ -364,8 +372,10 @@ class NavTester(object):
 
                     # 15. todo: 把本步预测融合进全局地图
                     # add crop uncertainty to uncertainty map
+                    # 物体语义种类的不确定度
                     sg.register_per_class_uncertainty(per_class_uncertainty_crop=per_class_uncertainty, pose=_rel_pose, abs_pose=torch.tensor(abs_poses, device=self.device))
                     # add semantic prediction to semantic map
+                    # 物体语义种类
                     sg.register_sem_pred(prediction_crop=mean_ensemble_prediction, pose=_rel_pose, abs_pose=torch.tensor(abs_poses, device=self.device))
 
 
@@ -373,11 +383,13 @@ class NavTester(object):
 
                     # 16. TODO: 规划长期目标（long-term goal, LTG）
                     # Estimate long term goal
+                    # steps_after_plan:超参数 K，控制重规划频率（例如每 5 步重算一次）。
+                    # ltg_dist: 当前位置到 LTG 的欧式距离（单位 = cell_size 米）；小于阈值（0.2m）视为“已到达”，要刷新目标。
                     if ((ltg_counter % self.options.steps_after_plan == 0) or  # either every k steps
                        (ltg_dist < 0.2)): # or we reached ltg
 
                         # Given hyperparams, estimate the cost map
-                        cost_map = tutils.get_cost_map(sg, sem_lbl, self.options.a_1, self.options.a_2)
+                        cost_map = tutils.get_cost_map(sg, sem_lbl, self.options.a_1, self.options.a_2)  # 默认a1=0.1，a2=1.0
                         # Use cost map to decide next long term direction
                         ltg = self.get_long_term_goal(sg, cost_map)
                         ltg_counter = 0 # reset the ltg counter
@@ -386,20 +398,27 @@ class NavTester(object):
                     # 17. （可选）可视化保存
                     # Option to save visualizations of steps
                     if self.options.save_nav_images:
-                        save_img_dir_ = self.options.save_img_dir_+'ep_'+str(idx)+'_'+objectgoal+'/'
+                        save_img_dir_ = self.options.save_img_dir + self.scene_id + '/ep_'+str(idx)+'_'+objectgoal+'/'
+                        print("     [zhjd-debug] save_img_dir_: ", save_img_dir_, ", t:", t)
                         if not os.path.exists(save_img_dir_):
                             os.makedirs(save_img_dir_)
                         # saves egocentric rgb, depth observations
+                        # 保存自我中心视角（Egocentric）RGB + 深度图 + 语义分割图
                         viz_utils.display_sample(img.cpu().numpy(), np.squeeze(depth.cpu().numpy()), 
                                                             semantic.cpu().numpy(), savepath=save_img_dir_+"path_"+str(t)+'.png')
                         # saves semantic grid (geocentric), object heatmap, and uncertainty
+                        # 保存语义栅格地图（Semantic Grid）、目标热力图和不确定性地图
                         viz_utils.save_visual_steps(self.test_ds, sg, sem_lbl, abs_poses[t], ltg.clone().cpu().numpy(), 
                                                             pose_coords.clone().cpu().numpy(), agent_height, save_img_dir_, t)
                         # saves predicted ares (egocentric)
+                        # 保存预测结果（Egocentric 栅格预测）
                         viz_utils.save_map_pred_steps(step_ego_grid_crops, mean_ensemble_spatial, 
                                                             mean_ensemble_prediction, pred_ego_crops_sseg, save_img_dir_, t)
                         # saves image semantic segmentation
-                        viz_utils.write_tensor_imgSegm(img=pred_img_segm, savepath=save_img_dir_, name='pred_img_segm', t=t)
+                        # 存图像语义分割结果（来自视觉分割网络）
+                        if self.options.with_img_segm:
+                            pred_img_segm = self.img_segmentor(img_segm_input)
+                            viz_utils.write_tensor_imgSegm(img=pred_img_segm['pred_segm'].squeeze(0), savepath=save_img_dir_, name='pred_img_segm', t=t)
 
 
                     ##### Action decision process #####
@@ -542,7 +561,9 @@ class NavTester(object):
     def get_long_term_goal(self, sg, cost_map):
         ### Choose long term goal
         goal = torch.zeros((sg.per_class_uncertainty_map.shape[0], 1, 2), dtype=torch.int64, device=self.device)
+        # explored_grid中，未探索区域为0
         explored_grid = map_utils.get_explored_grid(sg.proj_grid)
+        # current_UNexplored_map中，未探索区域为1
         current_UNexplored_map = 1-explored_grid
         unexplored_cost_map = cost_map * current_UNexplored_map
         unexplored_cost_map = unexplored_cost_map.squeeze(1)
@@ -575,14 +596,14 @@ class SemMapTester(object):
         print("     [zhjd-debug] config_val_file:", options.config_val_file)   # log: configs/my_objectnav_mp3d_val.yaml
         self.test_ds = HabitatDataOffline(options, config_file=options.config_val_file, img_segm=self.options.with_img_segm)
 
+        # TODO: L2M的导入
         print("     [zhjd-debug] ensemble_dir:", self.options.ensemble_dir)
         ensemble_exp = os.listdir(self.options.ensemble_dir) # ensemble_dir should be a dir that holds multiple experiments
         print("     [zhjd-debug] ensemble_exp:", ensemble_exp)
-
         ensemble_exp.sort() # in case the models are numbered put them in order
-        N = len(ensemble_exp) # number of models in the ensemble
         self.models_dict = {} # keys are the ids of the models in the ensemble
         for n in range(self.options.ensemble_size):
+            print("     [zhjd-debug] SemMapTester Init L2M_predictor_model ...")
             self.models_dict[n] = {'predictor_model': get_predictor_from_options(self.options)}
             self.models_dict[n] = {k:v.to(self.device) for k,v in self.models_dict[n].items()}
 
@@ -595,6 +616,30 @@ class SemMapTester(object):
             print("Model", n, "loading checkpoint", latest_checkpoint)
             self.models_dict[n] = tutils.load_model(models=self.models_dict[n], checkpoint_file=latest_checkpoint)
             self.models_dict[n]["predictor_model"].eval()
+
+        # TODO: RSMPNet的导入
+        print("     [zhjd-debug] ensemble_dir_rsmp:", self.options.ensemble_dir_rsmp)
+        ensemble_exp_rsmp = os.listdir(self.options.ensemble_dir_rsmp) # ensemble_dir should be a dir that holds multiple experiments
+        ensemble_exp_rsmp.sort() # in case the models are numbered put them in order
+        print("     [zhjd-debug] ensemble_exp_rsmp:", ensemble_exp_rsmp)
+        self.rsmp_models_dict = {}
+        # for n in range(1):
+        n = 0
+        print("     [zhjd-debug] SemMapTester Init rsmp_predictor_model ...")
+        self.rsmp_models_dict[n] = {'predictor_model': get_predictor_rsmp(self.options)}
+        self.rsmp_models_dict[n] = {k:v.to(self.device) for k,v in self.rsmp_models_dict[n].items()}
+
+        # Needed only for models trained with multi-gpu setting
+        self.rsmp_models_dict[n]['predictor_model'] = nn.DataParallel(self.rsmp_models_dict[n]['predictor_model'])
+
+        checkpoint_dir = self.options.ensemble_dir_rsmp + "/" + ensemble_exp_rsmp[n]
+        print('checkpoint_dir', checkpoint_dir)
+
+        latest_checkpoint = tutils.get_latest_model(save_dir=checkpoint_dir)
+        print("Model", n, "loading checkpoint", latest_checkpoint)
+        self.rsmp_models_dict[n] = tutils.load_model(models=self.rsmp_models_dict[n], checkpoint_file=latest_checkpoint)
+        self.rsmp_models_dict[n]["predictor_model"].eval()
+
 
         self.spatial_classes = {0:"void", 1:"occupied", 2:"free"}
         self.object_classes = {0:"void", 17:"floor", 15:'wall', 3:"table", 4:"cushion", 13:"counter", 1:"chair", 5:"sofa", 6:"bed"}
@@ -669,6 +714,38 @@ class SemMapTester(object):
                 # Getting the mean predictions from the ensemble
                 pred_maps_objects = torch.mean(ensemble_object_maps, dim=0) # B x T x C x cH x cW
                 pred_maps_spatial = torch.mean(ensemble_spatial_maps, dim=0)
+
+                # 经过验证，可知L2M输出的pred_maps_objects不确定度非常大。
+                # target = 0.037037037  # 1/27
+                # threshold = 0.01
+                # for i in range(0, 64):
+                #     for j in range(0, 64):
+                #         g = pred_maps_objects[0,0, :, i, j]
+                #         m = g.max().item()  # float
+                #         if abs(m - target) > threshold:
+                #             print(f"({i},{j}) g.max() = {m}")
+                # print(  "[zhjd-debug] pred_maps_objects.size(): ", pred_maps_objects.size())
+                # viz_utils.show_image_color_and_extract(pred_maps_objects, "Predicted Map L2M", 27)
+                # max_idx = torch.argmax(pred_maps_objects, dim=2, keepdim=True)  # [B,T,1,64,46]
+                # sharpened = torch.full_like(pred_maps_objects, 0.00000001)
+                # sharpened.scatter_(2, max_idx, 1.0)
+                # sharpened = sharpened / sharpened.sum(dim=2, keepdim=True)
+                # NPZ_semantic_map = batch['step_ego_grid_27'].cpu()  # B x T x 27 x cH x cW
+                # viz_utils.show_image_color_and_extract(NPZ_semantic_map, "Predicted Map NPZ", 27)
+
+
+                # pred_maps_objects  pred_maps_spatial
+                batch_rsmp_input = {
+                    'step_ego_grid_27': pred_maps_objects,
+                    'step_ego_grid_crops_spatial': pred_maps_spatial
+                }
+
+                rsmp_output = self.rsmp_models_dict[0]['predictor_model'](batch_rsmp_input)
+                pred_maps_objects_rsmp = rsmp_output['pred_maps_raw_objects'].clone()
+                # viz_utils.show_image_color_and_extract(pred_maps_objects_rsmp, "Predicted Map RSMPNet", 27)
+                # viz_utils.show_image_sseg_2d_label(gt_crops_objects, "GT")
+
+                pred_maps_objects = pred_maps_objects_rsmp
 
                 # 对 object / spatial 的预测概率取最大值索引，得到预测标签 [B, T, 1, H, W]。
                 # Decide label for each location based on predition probs

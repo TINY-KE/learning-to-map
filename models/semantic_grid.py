@@ -20,7 +20,7 @@ class SemanticGrid(object):
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         
         # predicted sem grid over entire scene -- initially uniform distribution over the labels
-        #  初始化均匀先验, 则proj_grid中的每一个值都为 1/27
+        #  初始化均匀先验, 则sem_grid中的每一个值都为 1/27
         self.sem_grid = torch.ones((self.batch_size, self.object_labels, self.grid_dim[0], self.grid_dim[1]), dtype=torch.float32, device=self.device)
         self.sem_grid = self.sem_grid*(1/self.object_labels)
 
@@ -122,9 +122,12 @@ class SemanticGrid(object):
                                                 self.grid_dim[0], self.grid_dim[1]), dtype=torch.float32).to(geo_grid.device)
         for i in range(geo_grid.shape[1]): # sequence length
             new_obsv_grid = geo_grid[:,i,:,:,:]
+            # 逐类别乘法更新（贝叶斯乘积）
             mul_probs_grid = new_obsv_grid * self.sem_grid
+            # 归一化为概率分布
             normalization_grid = torch.sum(mul_probs_grid, dim=1, keepdim=True)
             self.sem_grid = mul_probs_grid / normalization_grid.repeat(1, self.object_labels, 1, 1)
+            # 记录
             step_geo_grid[:,i,:,:,:] = self.sem_grid.clone()
         return step_geo_grid
 
@@ -148,6 +151,8 @@ class SemanticGrid(object):
         # Update only the locations where the geo_grid has uncertainty values
         for i in range(geo_grid.shape[1]):
             new_uncertainty_grid = geo_grid[:,i,:,:,:].clone()
+            # 找到当前帧中“有意义的不确定度值”的位置索引。
+            # 即，仅对 > 1e-7 的非零元素进行更新，避免更新那些 padding 或未观测区域。
             inds = torch.nonzero(new_uncertainty_grid > 1e-7, as_tuple=True)
             current_map = self.per_class_uncertainty_map.clone()
             current_map[inds[0],inds[1],inds[2],inds[3]] += new_uncertainty_grid[inds[0],inds[1],inds[2],inds[3]]
@@ -182,15 +187,32 @@ class SemanticGrid(object):
         geo_uncertainty_maps = self.spatialTransformer(grid=ego_uncertainty_map, pose=pose, abs_pose=abs_pose)
         self.update_uncertainty_map_avg(geo_grid=geo_uncertainty_maps.unsqueeze(0)) # updates sg.uncertainty_map
 
-
+    # 作用：把每类不确定度的小视野裁剪（crop，机器人坐标系/ego-centric）放进一张全局大小的自车坐标系网格，
+    # 再用位姿把它配准到全局/地理坐标系（geo-centric）的语义网格上，最后把这些不确定度按平均规则融合进场景级的不确定度地图里。
+    # per_class_uncertainty_crop: 形状 [B, T, C, cH, cW]
+    # B 批大小（这里通常就是 1）
+    # T 时间步/帧数（例如该 episode 内连续若干步的裁剪）
+    # C 语义类别数（例如 27）
+    # cH, cW 裁剪区域的高宽（比如 64×64）
+    # 函数里紧接着会 squeeze(0)，意味着期望 B=1。
     def register_per_class_uncertainty(self, per_class_uncertainty_crop, pose, abs_pose):
         B, T, C, cH, cW = per_class_uncertainty_crop.shape
+        # 在自车坐标系下建立一张大网格（H×W = self.grid_dim），初值全 0（不确定度 0，表示“未知处没有不确定度记录”，而非“确定”——注意后续融合逻辑会处理）。
         ego_per_class_uncertainty_map = torch.zeros((T,C,self.grid_dim[0],self.grid_dim[1]), dtype=torch.float32, device=self.device)
+        # 把裁剪块贴回到这张大网格里：
+        # 用 crop_start:crop_end 指定裁剪块在大网格中的位置（通常居中，以“机器人在网格中心”为假设）。
+        # 赋值后，ego-grid 里只有裁剪区域有数据，其他区域仍为 0。
         ego_per_class_uncertainty_map[:,:, self.crop_start:self.crop_end, self.crop_start:self.crop_end] = per_class_uncertainty_crop.squeeze(0)
+        # 把自车坐标系的不确定度图（逐类、逐时刻）转移到全局坐标系
+        # pose 是相对位姿序列（t−1→t），abs_pose 是全局位姿（世界坐标系）。模块内会把每个时间步的 ego 网格旋转+平移到全局网格上。
         geo_per_class_uncertainty_maps = self.spatialTransformer(grid=ego_per_class_uncertainty_map, pose=pose, abs_pose=abs_pose)
+        # 把配准后的不确定度图送进平均融合器：
+        # 这里用的是均值融合（而不是贝叶斯），即：同一网格同一类别来自不同时刻的不确定度，做加权或简单平均，得到稳定的不确定度估计。
+        # unsqueeze(0) 补回 B 维度。
         self.update_per_class_uncertainty_map_avg(geo_grid=geo_per_class_uncertainty_maps.unsqueeze(0)) # updates sg.per_class_uncertainty_map
 
 
+    # 作用：把每类语义概率预测的裁剪块注册到全局语义网格，并通过贝叶斯更新与历史证据融合，得到随时间收敛的语义概率地图。
     def register_sem_pred(self, prediction_crop, pose, abs_pose):
         B, T, C, cH, cW = prediction_crop.shape
         ego_pred_map = torch.ones((T,C,self.grid_dim[0],self.grid_dim[1]), dtype=torch.float32, device=self.device) * (1/C)
